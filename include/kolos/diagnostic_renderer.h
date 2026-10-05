@@ -1,14 +1,10 @@
 #pragma once
-#include <kolos/buffer_pool.h>
+#include <vulkan/vulkan.h>
 namespace kolos {
-// Synchronous clear including ownership/layout transitions; no slot selection.
+// Records only clear commands; caller supplies a recording command buffer and
+// an image prepared in TRANSFER_DST_OPTIMAL for graphics queue ownership.
 class DiagnosticRenderer {
 public:
-    DiagnosticRenderer(Context& context, KolosBufferPool& pool)
-        : context_(context), pool_(pool) {}
-    void draw(VkImage image, uint32_t frame);
-private:
-    Context& context_;
-    KolosBufferPool& pool_;
+    void record(VkCommandBuffer commandBuffer, VkImage image, uint32_t frame);
 };
 }

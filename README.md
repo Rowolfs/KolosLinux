@@ -63,10 +63,12 @@ with PASS, and STOP receives DONE after the final Android release fence.
 Context context;
 initialize(context);
 KolosBufferPool pool(context, socketPath);
-DiagnosticRenderer renderer(context, pool);
+DiagnosticRenderer renderer;
 for (uint32_t frame = 0; frame < frames; ++frame) {
     auto buffer = pool.acquire();
-    renderer.draw(buffer.image(), frame);
+    auto commands = pool.prepareForRender(buffer);
+    renderer.record(commands, buffer.image(), frame);
+    pool.prepareForPresent(buffer);
     pool.present(buffer, frame);
 }
 pool.stop();
@@ -97,11 +99,36 @@ timeout; no acquire-specific sleep loop or wire change is introduced.
 Tokens do not automatically return slots when destroyed. The pool must outlive
 renderer and token use; the Vulkan context must outlive the pool.
 
-Renderer takes only an image and frame number. Its private pool lookup verifies
-ACQUIRED state and accesses the existing `Imported::initialized` flag. The actual
-GPU clear, ownership/layout barriers and GPU fence wait remain unchanged. The
-renderer does not select or receive a slot number and performs no presentation IPC.
-A later step can separate transition recording without changing the import path.
+Renderer records only the animated clear into the supplied command buffer, using
+an image in TRANSFER_DST_OPTIMAL. It has no pool, slot, ownership or first-use state.
+
+`prepareForRender(buffer)` validates the token and ACQUIRED state, resets/begins
+the existing command buffer, and records the FOREIGN-to-graphics barrier.
+`prepareForPresent(buffer)` records the graphics-to-FOREIGN barrier, ends recording,
+submits once and waits on the existing GPU fence. Only successful fence completion
+sets PRESENT_READY; `present()` rejects any image without that state.
+
+Each slot has a separate image lifecycle:
+
+```text
+FOREIGN_UNDEFINED (new import) or FOREIGN_GENERAL (after Android FREE)
+  -> prepareForRender: RENDER_READY (recorded graphics / TRANSFER_DST_OPTIMAL)
+  -> prepareForPresent + submit + fence: PRESENT_READY (GENERAL / FOREIGN)
+  -> present: stays PRESENT_READY
+  -> Android FREE: FOREIGN_GENERAL
+```
+
+The slot lifecycle remains FREE -> ACQUIRED -> PRESENTED -> FREE. Image first-use
+is represented by FOREIGN_UNDEFINED; `Imported::initialized` is removed. Recording
+state describes the commands being constructed, not completed GPU execution. Only
+one slot may record into the shared command buffer at a time. Token identity and
+generation checks apply to both preparation methods and present. Repeated begin,
+end before begin, and present before GPU completion are rejected. Any Vulkan error
+invalidates the pool, preventing presentation with uncertain GPU ownership.
+
+For Debian validation, retain the 300-frame visual/STOP-DONE checks and exercise
+present before preparation, repeated preparation, wrong/stale tokens and end before
+begin. No build or binaries are run during Windows-side refactoring.
 
 No Mesa integration or explicit fence FD exchange is introduced. See
 [protocol lifecycle](protocol/README.md).

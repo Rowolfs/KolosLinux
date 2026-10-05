@@ -10,8 +10,9 @@ They do not transport GPU fences. Slot count is fixed at three.
 4. Open the control connection, send START, receive three initial FREE messages.
 5. Acquire the front of the local FIFO. If empty, block on control IPC and process
    FREE until a slot is available; validate FREE state before moving to ACQUIRED.
-6. Acquire FOREIGN ownership, clear the image, release ownership to FOREIGN
-   in GENERAL layout, and wait for the Vulkan GPU fence.
+6. Pool begins the shared command buffer and records FOREIGN acquisition into
+   TRANSFER_DST_OPTIMAL. Renderer records only clear. Pool records release into
+   GENERAL / FOREIGN, submits once and waits for the Vulkan GPU fence.
 7. Send PRESENT(slot, frame). Process returned FREE messages until matching ACK.
 8. Android sets the new AHB on SurfaceControl. Its transaction completion callback
    yields the previous buffer's release fence. Android waits before FREE(previous).

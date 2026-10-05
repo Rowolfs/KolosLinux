@@ -10,7 +10,6 @@ struct Imported {
     VkDeviceMemory memory=VK_NULL_HANDLE;
     int sock=-1,importFd=-1;
     std::vector<int> fds;
-    bool initialized=false;
     Imported() = default;
     Imported(const Imported&) = delete;
     Imported& operator=(const Imported&) = delete;

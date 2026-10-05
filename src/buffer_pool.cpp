@@ -2,6 +2,10 @@
 #include <utility>
 
 namespace kolos {
+static void check(VkResult result, const char* operation) {
+    if (result != VK_SUCCESS)
+        throw std::runtime_error(std::string(operation) + ": VkResult=" + std::to_string(result));
+}
 AcquiredBuffer::AcquiredBuffer(std::shared_ptr<const int> owner, uint32_t slot,
                                uint64_t generation, VkImage image)
     : owner_(std::move(owner)), slot_(slot), generation_(generation), image_(image) {}
@@ -23,7 +27,7 @@ VkImage AcquiredBuffer::image() const {
     return image_;
 }
 
-KolosBufferPool::KolosBufferPool(Context& context, const std::string& path) {
+KolosBufferPool::KolosBufferPool(Context& context, const std::string& path) : context_(context) {
     for (uint32_t i = 0; i < slotCount; ++i)
         importBuffer(context, slots_[i].buffer, path, i);
     control_ = kw::connectTo(path);
@@ -48,7 +52,9 @@ void KolosBufferPool::processFree(const kw::Message& message, bool initial) {
     } else {
         kw::require(slot.state != SlotState::FREE, "duplicate FREE");
         kw::require(slot.state == SlotState::PRESENTED, "FREE for slot not PRESENTED");
+        kw::require(slot.imageState == ImageState::PRESENT_READY, "FREE for image not presentation ready");
         slot.state = SlotState::FREE;
+        slot.imageState = ImageState::FOREIGN_GENERAL;
     }
     free_.push_back(message.index);
 }
@@ -99,6 +105,7 @@ uint32_t KolosBufferPool::processIncomingMessageBlocking(IncomingPhase phase,
 
 AcquiredBuffer KolosBufferPool::acquire() {
     requireActive();
+    kw::require(recordingSlot_ == UINT32_MAX, "acquire during command recording");
     while (free_.empty())
         processIncomingMessageBlocking(IncomingPhase::ACQUIRE);
     const uint32_t index = free_.front();
@@ -106,20 +113,86 @@ AcquiredBuffer KolosBufferPool::acquire() {
     auto& slot = slots_[index];
     kw::require(slot.state == SlotState::FREE && slot.initialFreeReceived,
                 "acquire slot not FREE");
+    kw::require(slot.imageState == ImageState::FOREIGN_UNDEFINED ||
+                slot.imageState == ImageState::FOREIGN_GENERAL, "acquire image not FOREIGN");
     free_.pop_front();
     slot.state = SlotState::ACQUIRED;
     ++slot.generation;
     return AcquiredBuffer(identity_, index, slot.generation, slot.buffer.image);
 }
 
-void KolosBufferPool::present(const AcquiredBuffer& buffer, uint32_t frame) {
+KolosBufferPool::Slot& KolosBufferPool::validateAcquired(const AcquiredBuffer& buffer) {
     requireActive();
     kw::require(buffer.owner_ == identity_, "buffer was not acquired from this pool");
-    kw::require(buffer.slot_ < slotCount, "invalid present slot");
+    kw::require(buffer.slot_ < slotCount, "invalid acquisition slot");
     auto& slot = slots_[buffer.slot_];
     kw::require(slot.generation == buffer.generation_ && slot.buffer.image == buffer.image_,
                 "stale acquisition token");
-    kw::require(slot.state == SlotState::ACQUIRED, "present requires ACQUIRED buffer (or repeated present)");
+    kw::require(slot.state == SlotState::ACQUIRED, "operation requires ACQUIRED buffer (or repeated present)");
+    return slot;
+}
+
+VkCommandBuffer KolosBufferPool::prepareForRender(const AcquiredBuffer& buffer) {
+    auto& slot = validateAcquired(buffer);
+    kw::require(recordingSlot_ == UINT32_MAX, "another buffer is already recording");
+    kw::require(slot.imageState == ImageState::FOREIGN_UNDEFINED ||
+                slot.imageState == ImageState::FOREIGN_GENERAL, "render already begun for acquisition");
+    auto& v = context_;
+    try {
+        check(vkResetCommandPool(v.device,v.pool,0),"reset commands");
+        check(vkResetFences(v.device,1,&v.fence),"reset fence");
+        VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check(vkBeginCommandBuffer(v.cmd,&begin),"begin commands");
+        VkImageMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout=slot.imageState == ImageState::FOREIGN_UNDEFINED
+            ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+        barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcQueueFamilyIndex=VK_QUEUE_FAMILY_FOREIGN_EXT;barrier.dstQueueFamilyIndex=v.family;
+        barrier.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.image=slot.buffer.image;
+        barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        // Reuse is allowed only after Android's release fence signalled and FREE arrived.
+        vkCmdPipelineBarrier(v.cmd,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,
+                             0,nullptr,0,nullptr,1,&barrier);
+        slot.imageState = ImageState::RENDER_READY;
+        recordingSlot_ = buffer.slot_;
+        return v.cmd;
+    } catch (...) {
+        failed_ = true;
+        throw;
+    }
+}
+
+void KolosBufferPool::prepareForPresent(const AcquiredBuffer& buffer) {
+    auto& slot = validateAcquired(buffer);
+    kw::require(recordingSlot_ == buffer.slot_ && slot.imageState == ImageState::RENDER_READY,
+                "prepareForPresent requires active render preparation");
+    auto& v = context_;
+    try {
+        VkImageMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+        barrier.srcQueueFamilyIndex=v.family;barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_FOREIGN_EXT;
+        barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=0;
+        barrier.image=slot.buffer.image;
+        barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        vkCmdPipelineBarrier(v.cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,
+                             0,nullptr,0,nullptr,1,&barrier);
+        check(vkEndCommandBuffer(v.cmd),"end commands");
+        VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submit.commandBufferCount=1;submit.pCommandBuffers=&v.cmd;
+        check(vkQueueSubmit(v.queue,1,&submit,v.fence),"submit GPU clear");
+        check(vkWaitForFences(v.device,1,&v.fence,VK_TRUE,10000000000ULL),"GPU completion");
+        slot.imageState = ImageState::PRESENT_READY;
+        recordingSlot_ = UINT32_MAX;
+    } catch (...) {
+        failed_ = true; // Unknown GPU completion/ownership: never send PRESENT.
+        throw;
+    }
+}
+
+void KolosBufferPool::present(const AcquiredBuffer& buffer, uint32_t frame) {
+    auto& slot = validateAcquired(buffer);
+    kw::require(recordingSlot_ == UINT32_MAX, "present during command recording");
+    kw::require(slot.imageState == ImageState::PRESENT_READY, "present before GPU completion / FOREIGN release");
     kw::require(frame == nextFrame_, "invalid presentation frame sequence");
     slot.state = SlotState::PRESENTED;
     try {
@@ -131,17 +204,6 @@ void KolosBufferPool::present(const AcquiredBuffer& buffer, uint32_t frame) {
         failed_ = true; // Never retry after an ambiguous IPC send/receive failure.
         throw;
     }
-}
-
-Imported& KolosBufferPool::importedForRender(VkImage image) {
-    requireActive();
-    for (auto& slot : slots_) {
-        if (slot.buffer.image == image) {
-            kw::require(slot.state == SlotState::ACQUIRED, "render requires ACQUIRED image");
-            return slot.buffer;
-        }
-    }
-    throw std::runtime_error("image does not belong to buffer pool");
 }
 
 void KolosBufferPool::stop() {
