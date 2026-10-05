@@ -1,0 +1,10 @@
+/build/
+/build-*/
+/.bashrc
+/.profile
+/kolos_ahb_stream
+/kolos_ahb_import
+*.o
+*.a
+*.so
+*.tmp
