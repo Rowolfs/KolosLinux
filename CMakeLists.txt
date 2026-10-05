@@ -11,6 +11,7 @@ find_package(Threads REQUIRED)
 add_library(kolos_prototype STATIC
     src/vulkan_context.cpp
     src/ahb_import.cpp
+    src/buffer_pool.cpp
     src/diagnostic_renderer.cpp
 )
 target_compile_features(kolos_prototype PUBLIC cxx_std_17)

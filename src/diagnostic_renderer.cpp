@@ -10,7 +10,9 @@ static void need(bool ok,const char* text){kw::require(ok,text);}
 static void check(VkResult r,const char* text){
     if(r!=VK_SUCCESS)throw std::runtime_error(std::string(text)+": VkResult="+std::to_string(r));
 }
-void draw(Context& v,Imported& b,uint32_t frame){
+void DiagnosticRenderer::draw(VkImage image,uint32_t frame){
+    auto& v = context_;
+    auto& b = pool_.importedForRender(image);
     check(vkResetCommandPool(v.device,v.pool,0),"reset commands");
     check(vkResetFences(v.device,1,&v.fence),"reset fence");
     VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;

@@ -12,7 +12,8 @@ directory. The first commit preserves that source before module extraction.
 
 - `include/kolos/`: Vulkan context, imported buffer ownership and renderer interfaces.
 - `src/`: device initialization, AHB handle reception/dma-buf import, GPU clear.
-- `tools/kolos_ahb_stream.cpp`: triple-buffer diagnostic and FIFO frame orchestration.
+- `src/buffer_pool.cpp`: imported slots, FIFO availability, acquisition tokens and IPC lifecycle.
+- `tools/kolos_ahb_stream.cpp`: acquire/render/present diagnostic and frame pacing.
 - `tools/kolos_ahb_import.cpp`: original standalone single-buffer diagnostic.
 - `protocol/`: Android-compatible socket protocol and lifecycle specification.
 
@@ -56,16 +57,44 @@ No Linux/Vulkan build or runtime validation was performed on Windows. On Debian,
 check that all three imports succeed, animated colors display, 300 frames finish
 with PASS, and STOP receives DONE after the final Android release fence.
 
-## Next: KolosBufferPool
+## KolosBufferPool
 
-This stage separates modules without introducing the pool API yet. The FIFO,
-FREE validation and PRESENT/ACK handling remain visible in the diagnostic tool.
-Move those into `KolosBufferPool` together with the imported slot array. The
-intended acquire result is `{VkImage, slot}`; rendering must not select a slot.
+```cpp
+Context context;
+initialize(context);
+KolosBufferPool pool(context, socketPath);
+DiagnosticRenderer renderer(context, pool);
+for (uint32_t frame = 0; frame < frames; ++frame) {
+    auto buffer = pool.acquire();
+    renderer.draw(buffer.image(), frame);
+    pool.present(buffer, frame);
+}
+pool.stop();
+```
 
-Ownership/layout barriers currently remain in `draw(Context&, Imported&, frame)`
-and depend on `Imported::initialized`. Before reducing this to `render(VkImage)`,
-define how the pool records FOREIGN acquisition, initial UNDEFINED versus GENERAL
-layout, and release back to FOREIGN. Preserve CPU GPU-fence waiting in the first
-pool prototype. ACK does not release the presented slot; only Android FREE does.
-See [protocol lifecycle](protocol/README.md).
+The pool imports and owns all three buffers, opens the control connection and
+processes initial FREE grants. `acquire()` returns a move-only `AcquiredBuffer`
+with `image()`, not a public slot number. Its private pool identity, slot and
+acquisition generation are checked by `present()`.
+
+Slots follow `FREE -> ACQUIRED -> PRESENTED -> FREE`. The last transition only
+occurs on Android FREE, processed inside `present()` while waiting for ACK.
+Initial FREE grants populate the queue separately. ACK leaves the current slot
+PRESENTED. `stop()` retains STOP/DONE and rejects outstanding acquisitions; DONE
+confirms final release and closes the session logically, without adding a FREE.
+
+The pool rejects invalid indices, duplicate FREE, FREE for an ACQUIRED slot,
+foreign/default/moved-from/stale tokens, repeated present, invalid frame or ACK,
+and acquire with an empty queue. It is synchronous and single-threaded. An IPC
+failure makes the pool unusable, since remote ownership is then uncertain.
+Tokens do not automatically return slots when destroyed. The pool must outlive
+renderer and token use; the Vulkan context must outlive the pool.
+
+Renderer takes only an image and frame number. Its private pool lookup verifies
+ACQUIRED state and accesses the existing `Imported::initialized` flag. The actual
+GPU clear, ownership/layout barriers and GPU fence wait remain unchanged. The
+renderer does not select or receive a slot number and performs no presentation IPC.
+A later step can separate transition recording without changing the import path.
+
+No Mesa integration or explicit fence FD exchange is introduced. See
+[protocol lifecycle](protocol/README.md).

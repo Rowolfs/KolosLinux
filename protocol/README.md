@@ -18,9 +18,9 @@ They do not transport GPU fences. Slot count is fixed at three.
    release before returning DONE with the completed frame count.
 
 FREE is the permission to reuse a slot. ACK confirms the transaction handshake
-but leaves the current slot held by Android. A future pool's release of a presented
+but leaves the current slot held by Android. The pool's release of a presented
 slot must be driven by FREE, not by return from present or render.
 
-The current diagnostic is synchronous and fails if the FIFO is empty. A future
+The current pool is synchronous and fails if the FIFO is empty. A future
 blocking acquire should process control events while waiting. Cancellation,
 multiple frames in flight and explicit fence FD exchange are not introduced here.
