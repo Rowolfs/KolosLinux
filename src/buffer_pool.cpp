@@ -29,7 +29,7 @@ KolosBufferPool::KolosBufferPool(Context& context, const std::string& path) {
     control_ = kw::connectTo(path);
     kw::send(control_.value, kw::START);
     for (uint32_t i = 0; i < slotCount; ++i)
-        processFree(kw::read(control_.value), true);
+        processIncomingMessageBlocking(IncomingPhase::INITIAL_FREE);
 }
 
 void KolosBufferPool::requireActive() const {
@@ -53,9 +53,54 @@ void KolosBufferPool::processFree(const kw::Message& message, bool initial) {
     free_.push_back(message.index);
 }
 
+uint32_t KolosBufferPool::processIncomingMessageBlocking(IncomingPhase phase,
+                                                        uint32_t presentedSlot) {
+    try {
+        const auto message = kw::read(control_.value);
+        switch (message.op) {
+        case kw::FREE:
+            kw::require(phase != IncomingPhase::STOP_DONE, "expected final DONE, got FREE");
+            if (phase == IncomingPhase::PRESENT_ACK)
+                kw::require(message.index != presentedSlot, "FREE for current presentation");
+            processFree(message, phase == IncomingPhase::INITIAL_FREE);
+            break;
+        case kw::ACK:
+            // present() consumes its ACK synchronously. An ACK during acquire
+            // therefore has no pending presentation and is a protocol error.
+            kw::require(phase == IncomingPhase::PRESENT_ACK, "unexpected presentation ACK");
+            kw::require(message.index < slotCount, "invalid ACK slot");
+            kw::require(message.index == presentedSlot && message.serial == nextFrame_,
+                        "invalid presentation ACK");
+            kw::require(slots_[message.index].state == SlotState::PRESENTED,
+                        "ACK for slot not PRESENTED");
+            break; // ACK never changes slot availability.
+        case kw::DONE:
+            if (phase != IncomingPhase::STOP_DONE) {
+                stopped_ = true;
+                throw std::runtime_error("Android ended stream with unexpected DONE");
+            }
+            kw::require(message.serial == nextFrame_, "missing final release confirmation");
+            stopped_ = true; // Final displayed buffer released; no new acquisition.
+            break;
+        case kw::STOP:
+            // STOP is normally outbound only. Treat a peer STOP as termination,
+            // without inventing a reverse handshake or issuing another acquire.
+            stopped_ = true;
+            throw std::runtime_error("Android stopped stream");
+        default:
+            throw std::runtime_error("unexpected control message");
+        }
+        return message.op;
+    } catch (...) {
+        failed_ = true; // Includes EOF, socket timeout and protocol violations.
+        throw;
+    }
+}
+
 AcquiredBuffer KolosBufferPool::acquire() {
     requireActive();
-    kw::require(!free_.empty(), "no available buffer");
+    while (free_.empty())
+        processIncomingMessageBlocking(IncomingPhase::ACQUIRE);
     const uint32_t index = free_.front();
     kw::require(index < slotCount, "invalid acquire slot");
     auto& slot = slots_[index];
@@ -79,18 +124,8 @@ void KolosBufferPool::present(const AcquiredBuffer& buffer, uint32_t frame) {
     slot.state = SlotState::PRESENTED;
     try {
         kw::send(control_.value, kw::PRESENT, buffer.slot_, frame);
-        for (;;) {
-            auto message = kw::read(control_.value);
-            if (message.op == kw::FREE) {
-                // The just-presented buffer cannot be released by this handshake.
-                kw::require(message.index != buffer.slot_, "FREE for current presentation");
-                processFree(message, false);
-                continue;
-            }
-            kw::require(message.op == kw::ACK && message.index == buffer.slot_ &&
-                        message.serial == frame, "invalid presentation ACK");
-            break; // Keep PRESENTED until a later Android FREE.
-        }
+        while (processIncomingMessageBlocking(IncomingPhase::PRESENT_ACK,
+                                               buffer.slot_) != kw::ACK) {}
         ++nextFrame_;
     } catch (...) {
         failed_ = true; // Never retry after an ambiguous IPC send/receive failure.
@@ -115,11 +150,8 @@ void KolosBufferPool::stop() {
         kw::require(slot.state != SlotState::ACQUIRED, "stop with acquired buffer");
     try {
         kw::send(control_.value, kw::STOP, 0, nextFrame_);
-        auto done = kw::read(control_.value);
-        kw::require(done.op == kw::DONE && done.serial == nextFrame_,
-                    "missing final release confirmation");
+        processIncomingMessageBlocking(IncomingPhase::STOP_DONE);
         // DONE confirms release of the last displayed buffer, without another FREE.
-        stopped_ = true;
     } catch (...) {
         failed_ = true;
         throw;

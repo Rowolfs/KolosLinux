@@ -78,15 +78,22 @@ with `image()`, not a public slot number. Its private pool identity, slot and
 acquisition generation are checked by `present()`.
 
 Slots follow `FREE -> ACQUIRED -> PRESENTED -> FREE`. The last transition only
-occurs on Android FREE, processed inside `present()` while waiting for ACK.
+occurs on Android FREE, processed by the shared incoming-message dispatcher.
 Initial FREE grants populate the queue separately. ACK leaves the current slot
 PRESENTED. `stop()` retains STOP/DONE and rejects outstanding acquisitions; DONE
 confirms final release and closes the session logically, without adding a FREE.
 
 The pool rejects invalid indices, duplicate FREE, FREE for an ACQUIRED slot,
-foreign/default/moved-from/stale tokens, repeated present, invalid frame or ACK,
-and acquire with an empty queue. It is synchronous and single-threaded. An IPC
+foreign/default/moved-from/stale tokens, repeated present, and invalid frame or ACK.
+When the FIFO is empty, `acquire()` blocks on the existing socket read until FREE
+arrives. `present()` uses the same dispatcher while waiting for its ACK, and
+`stop()` uses it for DONE. An unsolicited ACK is rejected: synchronous present
+has already consumed every expected ACK before returning.
+It is synchronous and single-threaded. An IPC
 failure makes the pool unusable, since remote ownership is then uncertain.
+EOF, peer STOP, unexpected DONE, and the existing wire I/O timeout throw rather
+than wait indefinitely. The wire read retains its existing 30-second inactivity
+timeout; no acquire-specific sleep loop or wire change is introduced.
 Tokens do not automatically return slots when destroyed. The pool must outlive
 renderer and token use; the Vulkan context must outlive the pool.
 

@@ -36,6 +36,7 @@ public:
     KolosBufferPool(Context& context, const std::string& path);
     KolosBufferPool(const KolosBufferPool&) = delete;
     KolosBufferPool& operator=(const KolosBufferPool&) = delete;
+    // Blocks on control IPC when the FIFO is empty; propagates timeout/shutdown errors.
     AcquiredBuffer acquire();
     // Caller must complete GPU work before present. ACK does not release a slot.
     void present(const AcquiredBuffer& buffer, uint32_t frame);
@@ -50,6 +51,10 @@ private:
         uint64_t generation = 0;
         bool initialFreeReceived = false;
     };
+    enum class IncomingPhase { INITIAL_FREE, ACQUIRE, PRESENT_ACK, STOP_DONE };
+    // Read and validate one message. All control reads go through this dispatcher.
+    uint32_t processIncomingMessageBlocking(IncomingPhase phase,
+                                            uint32_t presentedSlot = UINT32_MAX);
     void processFree(const kw::Message& message, bool initial);
     Imported& importedForRender(VkImage image);
     void requireActive() const;
