@@ -40,6 +40,7 @@ public:
     ~KolosBufferPool();
     uint64_t sessionId() const { return sessionId_; }
     uint64_t poolGeneration() const { return poolGeneration_; }
+    VkExtent2D graphicsExtent() const;
     KolosBufferPool(const KolosBufferPool&) = delete;
     KolosBufferPool& operator=(const KolosBufferPool&) = delete;
     // Blocks on control IPC when the FIFO is empty; propagates timeout/shutdown errors.
@@ -66,6 +67,8 @@ private:
     };
     struct Generation {
         uint64_t number = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
         std::array<Slot, slotCount> slots;
         std::deque<uint32_t> free;
         std::shared_ptr<const int> identity = std::make_shared<const int>(0);

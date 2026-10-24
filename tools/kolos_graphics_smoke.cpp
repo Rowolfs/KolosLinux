@@ -24,8 +24,17 @@ int main(int argc,char** argv) {
         DiagnosticRenderer renderer;
         auto start=std::chrono::steady_clock::now();
         uint32_t frame=0;
+        uint64_t renderingGeneration=0;
         while(frame<frames) {
             auto buffer=pool.acquire();
+            if(pool.poolGeneration()!=renderingGeneration) {
+                const auto extent=pool.graphicsExtent();
+                renderingGeneration=pool.poolGeneration();
+                std::printf("Rendering session=%llu generation=%llu size=%ux%u frame=%u\n",
+                    (unsigned long long)pool.sessionId(),
+                    (unsigned long long)renderingGeneration,
+                    extent.width,extent.height,frame+1);
+            }
             VkCommandBuffer commands=pool.prepareForRender(buffer);
             renderer.record(commands,buffer.image(),frame);
             pool.prepareForPresent(buffer); // GPU fence wait before PRESENT.

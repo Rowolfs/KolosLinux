@@ -71,12 +71,19 @@ KolosBufferPool::~KolosBufferPool() {
         (void)vkWaitForFences(context_.device,1,&context_.fence,VK_TRUE,UINT64_MAX);
 }
 
+VkExtent2D KolosBufferPool::graphicsExtent() const {
+    kw::require(graphicsWire_, "graphics extent requires graphics v2");
+    return {current_->width, current_->height};
+}
+
 std::shared_ptr<KolosBufferPool::Generation> KolosBufferPool::importGraphicsGeneration(
     uint64_t generation,uint32_t width,uint32_t height,uint32_t format,uint32_t count) {
     kw::require(sessionId_ && generation && width && height && format==1 && count==slotCount,
                 "unsupported graphics pool configuration");
     auto imported=std::make_shared<Generation>();
     imported->number=generation;
+    imported->width=width;
+    imported->height=height;
     std::printf("Graphics session=%llu generation=%llu size=%ux%u slots=%u\n",
         (unsigned long long)sessionId_,(unsigned long long)generation,width,height,count);
     for(uint32_t i=0;i<slotCount;i++) {
