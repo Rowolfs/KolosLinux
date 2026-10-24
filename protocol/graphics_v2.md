@@ -1,7 +1,7 @@
-# Graphics IPC v1 smoke protocol
+# Graphics IPC v2 smoke protocol
 
 This is a private Android–Linux AF_UNIX SOCK_STREAM protocol. Every frame begins
-with four **little-endian uint32** values: magic `0x3158474b` (KGX1), version `1`,
+with four **little-endian uint32** values: magic `0x3158474b` (KGX1), version `2`,
 opcode and payload byte length. The payload is at most 4096 bytes. Fields below
 are encoded explicitly in the listed order; C++ padding is never transmitted.
 An identity is `uint64 sessionId, uint64 poolGeneration, uint32 slot`.
@@ -18,6 +18,8 @@ An identity is `uint64 sessionId, uint64 poolGeneration, uint32 slot`.
 | PRESENT / ACK | identity, uint64 serial |
 | DONE | uint64 sessionId, uint64 generation, uint64 completed frames |
 | ERROR | uint32 error code followed by UTF-8 diagnostic bytes |
+| POOL_REPLACED | Same fields as SESSION_INFO; Android announces a new current generation. |
+| POOL_READY | uint64 sessionId, uint64 generation; Linux has imported every new slot. |
 
 The first connection is the control stream: HELLO, HELLO_ACK, SESSION_INFO.
 Each GET_BUFFER uses a separate connection to the same socket. Android sends
@@ -32,6 +34,16 @@ ACK confirms a PRESENT transaction; **only FREE permits reacquisition**. On
 replacement, Android waits for the previous SurfaceControl release fence before
 FREE(previous). On STOP it detaches the final buffer, emits its FREE after
 release, then DONE. All control writes are serialized by the Android IPC thread.
+
+For live pool replacement, Android sends POOL_REPLACED on the existing control
+connection. Linux repeats GET_BUFFER / BUFFER_INFO / handle / IMPORT_ACK for
+each new slot on fresh import sockets, then sends POOL_READY. Android responds
+with one initial FREE for each new slot. Linux makes the new generation current
+only after all three imports and the POOL_READY write succeed. Older FREE
+messages retain their generation and never enter the current acquire queue.
+An old PRESENT already sent when POOL_REPLACED arrives is discarded by Android;
+Linux retries that frame on the new generation. The last old displayed AHB is
+released by the first new SurfaceControl transaction and its release fence.
 
 The smoke importer still recognizes only the previously observed Qualcomm
 linear RGBA8 handle family: 148 bytes, two FDs, known handle field signatures,

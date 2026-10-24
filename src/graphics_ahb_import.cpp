@@ -42,7 +42,7 @@ static std::vector<unsigned char> receive(Imported& s,int socketFd){
 void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
                           uint32_t height,uint32_t stride,uint32_t ahbFormat,uint32_t index){
     s.device=v.device;auto gpu=v.gpu;
-    std::printf("AHB slot=%u metadata width=%u height=%u stride=%u format=%u usage=unavailable-in-graphics-v1\n",
+    std::printf("AHB slot=%u metadata width=%u height=%u stride=%u format=%u usage=unavailable-in-graphics-v2\n",
                 index,width,height,stride,ahbFormat);
     need(width>0 && height>0 && stride>=width && ahbFormat==1,"unsupported AHB metadata");
     auto bytes=receive(s,socketFd);
