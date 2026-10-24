@@ -54,8 +54,10 @@ void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
             else
                 std::printf("AHB fd[%zu] fstat failed: errno=%d (%s)\n",i,errno,strerror(errno));
         }
-        // Match the exact handle family observed on the user's device. Padding,
-        // process IDs, allocation IDs and old process addresses are not used.
+        // This is still a device-specific layout hypothesis. The observed
+        // allocation has stride-sized rows and may have more rows than the
+        // visible image. Require the handle, AHB metadata and pixel FD size
+        // to agree before attempting the known linear Vulkan import path.
         need(stride<=UINT32_MAX/4,"unsupported AHB extent");
         const uint64_t minimumSize=uint64_t(stride)*4*height;
         need(minimumSize<=UINT32_MAX,"unsupported AHB extent");
@@ -69,11 +71,19 @@ void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
         equal(0,0x47423031);equal(1,width);equal(2,height);equal(3,stride);
         equal(4,1);equal(5,1);equal(6,0xb00);equal(10,2);equal(11,24);
         equal(13,0x676d736d);equal(14,0x00100288);
-        equal(15,width);equal(16,height);equal(17,stride);equal(18,height);
+        equal(15,stride);
+        const bool allocationRowsMatch=w[16]>=height;
+        std::printf("AHB candidate w[16] allocation rows: %s actual=%u visibleHeight=%u\n",
+                    allocationRowsMatch?"PASS":"FAIL",w[16],height);
+        candidate &= allocationRowsMatch;
+        equal(17,width);equal(18,height);
         equal(19,1);equal(20,0);equal(21,1);equal(24,0xb00);equal(25,0);
-        const bool sizeMatch=w[26]>=minimumSize;
-        std::printf("AHB candidate w[26]: %s actual=%u minimum=%llu\n",
-                    sizeMatch?"PASS":"FAIL",w[26],static_cast<unsigned long long>(minimumSize));
+        const uint64_t allocationBytes=uint64_t(stride)*w[16]*4;
+        const bool sizeMatch=allocationBytes<=UINT32_MAX && w[26]==allocationBytes;
+        std::printf("AHB candidate w[26]: %s actual=%u stride*allocationRows*4=%llu minimum=%llu\n",
+                    sizeMatch?"PASS":"FAIL",w[26],
+                    static_cast<unsigned long long>(allocationBytes),
+                    static_cast<unsigned long long>(minimumSize));
         candidate &= sizeMatch;
         equal(27,0);equal(28,0);
 
