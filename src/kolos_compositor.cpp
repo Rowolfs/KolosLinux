@@ -160,7 +160,7 @@ private:
         auto* surface = static_cast<Surface*>(wl_resource_get_user_data(value));
         switch (opcode) {
         case 0: wl_resource_destroy(value); break;
-        case 1: surface->pendingBuffer = static_cast<wl_resource*>(args[0].o); break;
+        case 1: surface->pendingBuffer = reinterpret_cast<wl_resource*>(args[0].o); break;
         case 3: {
             auto* callback = resource(wl_resource_get_client(value),
                                       &wl_callback_interface, args[0].n);
@@ -212,7 +212,7 @@ private:
             break;
         }
         case 2: {
-            auto* wlSurface = static_cast<wl_resource*>(args[1].o);
+            auto* wlSurface = reinterpret_cast<wl_resource*>(args[1].o);
             auto it = self->surfaces_.find(wlSurface);
             if (it == self->surfaces_.end() || wl_resource_get_client(wlSurface) != client ||
                 it->second->xdgSurface) {
@@ -305,7 +305,7 @@ private:
         auto* self = static_cast<KolosCompositor*>(wl_resource_get_user_data(manager));
         if (opcode == 0) { wl_resource_destroy(manager); return 0; }
         if (opcode != 1) return 0;
-        auto* wlSurface = static_cast<wl_resource*>(args[1].o);
+        auto* wlSurface = reinterpret_cast<wl_resource*>(args[1].o);
         auto it = self->surfaces_.find(wlSurface);
         if (it == self->surfaces_.end() ||
             wl_resource_get_client(wlSurface) != wl_resource_get_client(manager) ||
