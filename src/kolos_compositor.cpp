@@ -387,6 +387,14 @@ private:
         } else if (opcode == 3) {
             uint32_t slot = args[2].u;
             uint64_t serial = join(args[3].u, args[4].u);
+            if (generation < window->pool.generation) {
+                // An old swapchain may finish a queued present after resize.
+                // Android has retired that pool, so this frame cannot display.
+                std::printf("PRESENT dropped retired generation=%llu slot=%u serial=%llu\n",
+                    (unsigned long long)generation, slot,
+                    (unsigned long long)serial);
+                return 0;
+            }
             if (generation != window->pool.generation || slot >= window->pool.slots) {
                 kolos_surface_v1_send_error(resource, "stale PRESENT");
                 return 0;

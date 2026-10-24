@@ -255,6 +255,12 @@ void AndroidGraphicsBridge::run() {
                         running = true;
                         awaitingReady = false;
                     } else if (cmd.type == Command::Type::Present) {
+                        if (cmd.id.session == pool.session &&
+                            cmd.id.generation < pool.generation) {
+                            // The compositor may have queued this before the
+                            // Android replacement reached the bridge worker.
+                            continue;
+                        }
                         if (!running || cmd.id.session != pool.session ||
                             cmd.id.generation != pool.generation ||
                             cmd.id.slot >= pool.slots)
