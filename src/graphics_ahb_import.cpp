@@ -4,6 +4,8 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <cmath>
+#include <cerrno>
+#include <cstring>
 namespace kolos {
 static void need(bool ok,const char* text){kw::require(ok,text);}
 static void check(VkResult r,const char* text){
@@ -35,26 +37,45 @@ static std::vector<unsigned char> receive(Imported& s,int socketFd){
 void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
                           uint32_t height,uint32_t stride,uint32_t ahbFormat,uint32_t index){
     s.device=v.device;auto gpu=v.gpu;
+    std::printf("AHB slot=%u metadata width=%u height=%u stride=%u format=%u usage=unavailable-in-graphics-v1\n",
+                index,width,height,stride,ahbFormat);
     need(width>0 && height>0 && stride>=width && ahbFormat==1,"unsupported AHB metadata");
     auto bytes=receive(s,socketFd);
     std::printf("Received %zu bytes, %zu FDs\n",bytes.size(),s.fds.size());
         need(bytes.size()==148 && s.fds.size()==2,"unexpected AHB wire layout; stop");
         uint32_t w[37]; memcpy(w,bytes.data(),sizeof(w));
+        for(uint32_t i=0;i<37;i++)
+            std::printf("AHB handle w[%02u]=0x%08x (%u)\n",i,w[i],w[i]);
+        for(size_t i=0;i<s.fds.size();i++) {
+            struct stat fdStat{};
+            if(fstat(s.fds[i],&fdStat)==0)
+                std::printf("AHB fd[%zu] size=%lld mode=0%o\n",i,
+                            static_cast<long long>(fdStat.st_size),unsigned(fdStat.st_mode));
+            else
+                std::printf("AHB fd[%zu] fstat failed: errno=%d (%s)\n",i,errno,strerror(errno));
+        }
         // Match the exact handle family observed on the user's device. Padding,
         // process IDs, allocation IDs and old process addresses are not used.
-        const uint64_t minimumSize=uint64_t(stride)*height*4;
-        need(minimumSize<=UINT32_MAX && stride<=UINT32_MAX/4,"unsupported AHB extent");
-        need(w[0]==0x47423031 && w[1]==width && w[2]==height && w[3]==stride &&
-             w[4]==1 && w[5]==1 && w[6]==0xb00 && w[10]==2 && w[11]==24 &&
-             w[13]==0x676d736d && w[14]==0x00100288 &&
-             w[15]==width && w[16]==height && w[17]==stride && w[18]==height &&
-             w[19]==1 && w[20]==0 && w[21]==1 && w[24]==0xb00 &&
-             w[25]==0 && w[26]>=minimumSize && w[27]==0 && w[28]==0,
-             "AHB differs from tested linear-layout candidate; stop");
-        struct stat st{};
-        need(fstat(s.fds[0],&st)==0 && st.st_size>=static_cast<off_t>(minimumSize) &&
-             uint64_t(st.st_size)==w[26],"unexpected pixel allocation size");
-        std::printf("Validated observed Qualcomm handle family; hypothesis RGBA8 linear modifier=0 offset=0 pitch=%u. Untested sizes/layouts fail closed.\n",stride*4);
+        need(stride<=UINT32_MAX/4,"unsupported AHB extent");
+        const uint64_t minimumSize=uint64_t(stride)*4*height;
+        need(minimumSize<=UINT32_MAX,"unsupported AHB extent");
+        bool candidate=true;
+        auto equal=[&](uint32_t index,uint32_t expected) {
+            const bool match=w[index]==expected;
+            std::printf("AHB candidate w[%02u]: %s actual=0x%08x expected=0x%08x\n",
+                        index,match?"PASS":"FAIL",w[index],expected);
+            candidate &= match;
+        };
+        equal(0,0x47423031);equal(1,width);equal(2,height);equal(3,stride);
+        equal(4,1);equal(5,1);equal(6,0xb00);equal(10,2);equal(11,24);
+        equal(13,0x676d736d);equal(14,0x00100288);
+        equal(15,width);equal(16,height);equal(17,stride);equal(18,height);
+        equal(19,1);equal(20,0);equal(21,1);equal(24,0xb00);equal(25,0);
+        const bool sizeMatch=w[26]>=minimumSize;
+        std::printf("AHB candidate w[26]: %s actual=%u minimum=%llu\n",
+                    sizeMatch?"PASS":"FAIL",w[26],static_cast<unsigned long long>(minimumSize));
+        candidate &= sizeMatch;
+        equal(27,0);equal(28,0);
 
         constexpr VkFormat format=VK_FORMAT_R8G8B8A8_UNORM;
         constexpr auto handle=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
@@ -65,6 +86,18 @@ void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
         std::vector<VkDrmFormatModifierPropertiesEXT> modifiers(list.drmFormatModifierCount);
         list.pDrmFormatModifierProperties=modifiers.data();
         vkGetPhysicalDeviceFormatProperties2(gpu,format,&fp);
+        std::printf("Vulkan RGBA8 DRM modifiers: %u\n",list.drmFormatModifierCount);
+        for(const auto& m:modifiers)
+            std::printf("  modifier=0x%016llx planes=%u tilingFeatures=0x%llx\n",
+                        static_cast<unsigned long long>(m.drmFormatModifier),
+                        m.drmFormatModifierPlaneCount,
+                        static_cast<unsigned long long>(m.drmFormatModifierTilingFeatures));
+        need(candidate,"AHB differs from tested linear-layout candidate; stop");
+        struct stat st{};
+        need(fstat(s.fds[0],&st)==0 && st.st_size>=static_cast<off_t>(minimumSize) &&
+             uint64_t(st.st_size)==w[26],"unexpected pixel allocation size");
+        std::printf("Validated observed Qualcomm handle family; hypothesis RGBA8 linear modifier=0 offset=0 pitch=%u. Untested sizes/layouts fail closed.\n",stride*4);
+
         bool linear=false;
         for(auto& m:modifiers) if(m.drmFormatModifier==0 && m.drmFormatModifierPlaneCount==1 &&
             (m.drmFormatModifierTilingFeatures&VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) linear=true;

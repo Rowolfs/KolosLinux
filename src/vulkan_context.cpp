@@ -32,6 +32,16 @@ void initialize(Context& v){
         check(vkEnumerateDeviceExtensionProperties(gpu,nullptr,&ec,nullptr),"extension count");
         std::vector<VkExtensionProperties> exts(ec);
         check(vkEnumerateDeviceExtensionProperties(gpu,nullptr,&ec,exts.data()),"extensions");
+        const char* diagnostic[]={"VK_KHR_external_memory_fd",
+                                  "VK_EXT_external_memory_dma_buf",
+                                  "VK_EXT_image_drm_format_modifier",
+                                  "VK_EXT_queue_family_foreign",
+                                  "VK_ANDROID_external_memory_android_hardware_buffer"};
+        for(auto name:diagnostic) {
+            bool found=false;
+            for(uint32_t i=0;i<ec;i++) if(strcmp(name,exts[i].extensionName)==0) found=true;
+            std::printf("Vulkan device extension %s: %s\n",name,found?"available":"absent");
+        }
         const char* wanted[]={"VK_KHR_external_memory_fd","VK_EXT_external_memory_dma_buf",
                               "VK_EXT_image_drm_format_modifier","VK_EXT_queue_family_foreign"};
         for(auto name:wanted) {
