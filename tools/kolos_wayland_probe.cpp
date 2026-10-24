@@ -195,6 +195,12 @@ int main(int argc, char** argv) {
             while (!probe.failed &&
                    !(probe.readySent && probe.freeSlots.size() == probe.slots) &&
                    std::chrono::steady_clock::now() < graphicsDeadline) {
+                // Requests queued by NEW_POOL/BUFFER listeners must reach the
+                // compositor before waiting for its next event.
+                if (wl_display_flush(display) < 0) {
+                    probe.failed = true; probe.failure = "Wayland flush failed";
+                    break;
+                }
                 pollfd wait{wl_display_get_fd(display), POLLIN, 0};
                 int result = poll(&wait, 1, 100);
                 if (result > 0 && (wait.revents & POLLIN) &&
