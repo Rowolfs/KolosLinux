@@ -1,7 +1,17 @@
 #include <kolos/buffer_pool.h>
+#include <graphics_wire.h>
 #include <utility>
+#include <cstdio>
 
 namespace kolos {
+namespace gw = graphics::wire;
+static void putIdentity(std::vector<uint8_t>& p,uint64_t session,uint64_t generation,uint32_t slot) {
+    gw::put64(p,session);gw::put64(p,generation);gw::put32(p,slot);
+}
+static void checkIdentity(gw::Reader& r,uint64_t session,uint64_t generation,uint32_t& slot) {
+    auto s=r.get64(),g=r.get64();slot=r.get32();
+    kw::require(s==session && g==generation,"graphics identity mismatch");
+}
 static void check(VkResult result, const char* operation) {
     if (result != VK_SUCCESS)
         throw std::runtime_error(std::string(operation) + ": VkResult=" + std::to_string(result));
@@ -36,6 +46,43 @@ KolosBufferPool::KolosBufferPool(Context& context, const std::string& path) : co
         processIncomingMessageBlocking(IncomingPhase::INITIAL_FREE);
 }
 
+KolosBufferPool::KolosBufferPool(Context& context,const std::string& path,GraphicsV1)
+    :context_(context),graphicsV1_(true) {
+    control_=kw::connectTo(path);
+    gw::writeFrame(control_.value,gw::HELLO);
+    auto hello=gw::readFrame(control_.value);
+    kw::require(hello.opcode==gw::HELLO_ACK && hello.payload.empty(),"expected HELLO_ACK");
+    auto info=gw::readFrame(control_.value);
+    kw::require(info.opcode==gw::SESSION_INFO,"expected SESSION_INFO");
+    gw::Reader ir(info.payload);
+    sessionId_=ir.get64();poolGeneration_=ir.get64();
+    uint32_t width=ir.get32(),height=ir.get32(),format=ir.get32(),count=ir.get32();ir.end();
+    kw::require(sessionId_ && poolGeneration_ && width && height && format==1 && count==slotCount,
+                "unsupported graphics pool configuration");
+    std::printf("Graphics session=%llu generation=%llu size=%ux%u slots=%u\n",
+        (unsigned long long)sessionId_,(unsigned long long)poolGeneration_,width,height,count);
+    for(uint32_t i=0;i<slotCount;i++) {
+        auto connection=kw::connectTo(path);
+        std::vector<uint8_t> p;putIdentity(p,sessionId_,poolGeneration_,i);
+        gw::writeFrame(connection.value,gw::GET_BUFFER,p);
+        auto reply=gw::readFrame(connection.value);
+        kw::require(reply.opcode==gw::BUFFER_INFO,"expected BUFFER_INFO");
+        gw::Reader br(reply.payload);uint32_t index=UINT32_MAX;
+        checkIdentity(br,sessionId_,poolGeneration_,index);
+        uint32_t w=br.get32(),h=br.get32(),f=br.get32(),flags=br.get32(),stride=br.get32();br.end();
+        kw::require(index==i && w==width && h==height && f==format && flags==1 && stride>=w,
+                    "unsupported BUFFER_INFO");
+        int transferFd=connection.value;connection.value=-1;
+        importGraphicsBuffer(context,slots_[i].buffer,transferFd,w,h,stride,f,i);
+        gw::writeFrame(slots_[i].buffer.sock,gw::IMPORT_ACK,p);
+        close(slots_[i].buffer.sock);slots_[i].buffer.sock=-1;
+        std::printf("Imported slot %u\n",i);
+    }
+    std::vector<uint8_t> start;gw::put64(start,sessionId_);gw::put64(start,poolGeneration_);
+    gw::writeFrame(control_.value,gw::START,start);
+    for(uint32_t i=0;i<slotCount;i++) processIncomingMessageBlocking(IncomingPhase::INITIAL_FREE);
+}
+
 void KolosBufferPool::requireActive() const {
     kw::require(!stopped_ && !failed_, "buffer pool stopped or failed");
 }
@@ -62,10 +109,34 @@ void KolosBufferPool::processFree(const kw::Message& message, bool initial) {
 uint32_t KolosBufferPool::processIncomingMessageBlocking(IncomingPhase phase,
                                                         uint32_t presentedSlot) {
     try {
-        const auto message = kw::read(control_.value);
+        kw::Message message;
+        if(graphicsV1_) {
+            auto frame=gw::readFrame(control_.value);
+            if(frame.opcode==gw::ERROR) throw std::runtime_error("Android graphics ERROR");
+            gw::Reader r(frame.payload);uint32_t index=0;
+            switch(frame.opcode) {
+            case gw::FREE:
+                checkIdentity(r,sessionId_,poolGeneration_,index);r.end();
+                message={kw::MAGIC,kw::FREE,index,0};break;
+            case gw::ACK: {
+                checkIdentity(r,sessionId_,poolGeneration_,index);
+                uint64_t serial=r.get64();r.end();
+                kw::require(serial<=UINT32_MAX,"ACK serial overflow");
+                message={kw::MAGIC,kw::ACK,index,uint32_t(serial)};break;
+            }
+            case gw::DONE: {
+                auto s=r.get64(),g=r.get64(),frames=r.get64();r.end();
+                kw::require(s==sessionId_ && g==poolGeneration_ && frames<=UINT32_MAX,
+                            "DONE identity/count mismatch");
+                message={kw::MAGIC,kw::DONE,0,uint32_t(frames)};break;
+            }
+            default: throw std::runtime_error("unexpected graphics control opcode");
+            }
+        } else message=kw::read(control_.value);
         switch (message.op) {
         case kw::FREE:
-            kw::require(phase != IncomingPhase::STOP_DONE, "expected final DONE, got FREE");
+            kw::require(graphicsV1_ || phase != IncomingPhase::STOP_DONE,
+                        "expected final DONE, got FREE");
             if (phase == IncomingPhase::PRESENT_ACK)
                 kw::require(message.index != presentedSlot, "FREE for current presentation");
             processFree(message, phase == IncomingPhase::INITIAL_FREE);
@@ -196,7 +267,10 @@ void KolosBufferPool::present(const AcquiredBuffer& buffer, uint32_t frame) {
     kw::require(frame == nextFrame_, "invalid presentation frame sequence");
     slot.state = SlotState::PRESENTED;
     try {
-        kw::send(control_.value, kw::PRESENT, buffer.slot_, frame);
+        if(graphicsV1_) {
+            std::vector<uint8_t> p;putIdentity(p,sessionId_,poolGeneration_,buffer.slot_);
+            gw::put64(p,frame);gw::writeFrame(control_.value,gw::PRESENT,p);
+        } else kw::send(control_.value, kw::PRESENT, buffer.slot_, frame);
         while (processIncomingMessageBlocking(IncomingPhase::PRESENT_ACK,
                                                buffer.slot_) != kw::ACK) {}
         ++nextFrame_;
@@ -211,9 +285,14 @@ void KolosBufferPool::stop() {
     for (const auto& slot : slots_)
         kw::require(slot.state != SlotState::ACQUIRED, "stop with acquired buffer");
     try {
-        kw::send(control_.value, kw::STOP, 0, nextFrame_);
-        processIncomingMessageBlocking(IncomingPhase::STOP_DONE);
-        // DONE confirms release of the last displayed buffer, without another FREE.
+        if(graphicsV1_) {
+            std::vector<uint8_t> p;gw::put64(p,sessionId_);gw::put64(p,poolGeneration_);
+            gw::writeFrame(control_.value,gw::STOP,p);
+            while(processIncomingMessageBlocking(IncomingPhase::STOP_DONE)!=kw::DONE) {}
+        } else {
+            kw::send(control_.value, kw::STOP, 0, nextFrame_);
+            processIncomingMessageBlocking(IncomingPhase::STOP_DONE);
+        }
     } catch (...) {
         failed_ = true;
         throw;

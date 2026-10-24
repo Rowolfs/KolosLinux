@@ -20,4 +20,9 @@ struct Imported {
     }
 };
 void importBuffer(Context& v, Imported& s, const std::string& path, uint32_t index);
+// Production graphics v1: connection has already received BUFFER_INFO and is
+// positioned at the AHardwareBuffer native-handle bytes/SCM_RIGHTS transfer.
+void importGraphicsBuffer(Context& v, Imported& s, int socketFd, uint32_t width,
+                          uint32_t height, uint32_t stride, uint32_t ahbFormat,
+                          uint32_t index);
 }

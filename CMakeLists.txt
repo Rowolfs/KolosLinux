@@ -13,6 +13,8 @@ add_library(kolos_prototype STATIC
     src/ahb_import.cpp
     src/buffer_pool.cpp
     src/diagnostic_renderer.cpp
+    src/graphics_wire.cpp
+    src/graphics_ahb_import.cpp
 )
 target_compile_features(kolos_prototype PUBLIC cxx_std_17)
 target_include_directories(kolos_prototype PUBLIC include protocol)
@@ -24,3 +26,6 @@ target_link_libraries(kolos_ahb_stream PRIVATE kolos_prototype Threads::Threads)
 add_executable(kolos_ahb_import tools/kolos_ahb_import.cpp)
 target_compile_features(kolos_ahb_import PRIVATE cxx_std_17)
 target_link_libraries(kolos_ahb_import PRIVATE Vulkan::Vulkan)
+
+add_executable(kolos_graphics_smoke tools/kolos_graphics_smoke.cpp)
+target_link_libraries(kolos_graphics_smoke PRIVATE kolos_prototype Threads::Threads)

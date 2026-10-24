@@ -31,8 +31,12 @@ private:
 class KolosBufferPool {
 public:
     enum class SlotState { FREE, ACQUIRED, PRESENTED };
+    struct GraphicsV1 {};
     // Imports three buffers and completes START / initial FREE handshake.
     KolosBufferPool(Context& context, const std::string& path);
+    KolosBufferPool(Context& context, const std::string& path, GraphicsV1);
+    uint64_t sessionId() const { return sessionId_; }
+    uint64_t poolGeneration() const { return poolGeneration_; }
     KolosBufferPool(const KolosBufferPool&) = delete;
     KolosBufferPool& operator=(const KolosBufferPool&) = delete;
     // Blocks on control IPC when the FIFO is empty; propagates timeout/shutdown errors.
@@ -72,5 +76,8 @@ private:
     uint32_t recordingSlot_ = UINT32_MAX;
     bool stopped_ = false;
     bool failed_ = false;
+    bool graphicsV1_ = false;
+    uint64_t sessionId_ = 0;
+    uint64_t poolGeneration_ = 0;
 };
 }
