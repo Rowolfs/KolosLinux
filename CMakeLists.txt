@@ -88,7 +88,9 @@ target_link_libraries(kolos-compositor PRIVATE kolos_android_graphics_bridge Pkg
 
 add_executable(kolos-wayland-probe tools/kolos_wayland_probe.cpp
     "${GENERATED_PROTOCOL_DIR}/xdg-shell-client-protocol.h"
-    "${GENERATED_PROTOCOL_DIR}/xdg-shell-protocol.c")
+    "${GENERATED_PROTOCOL_DIR}/xdg-shell-protocol.c"
+    "${GENERATED_PROTOCOL_DIR}/kolos-graphics-v1-client-protocol.h"
+    "${GENERATED_PROTOCOL_DIR}/kolos-graphics-v1-protocol.c")
 target_compile_features(kolos-wayland-probe PRIVATE cxx_std_17)
 target_include_directories(kolos-wayland-probe PRIVATE "${GENERATED_PROTOCOL_DIR}")
 target_link_libraries(kolos-wayland-probe PRIVATE PkgConfig::WAYLAND_CLIENT)

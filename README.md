@@ -165,6 +165,17 @@ export WAYLAND_DISPLAY=wayland-0
 
 The probe creates one `wl_surface` and `xdg_toplevel` and exits after its
 initial configure. It does not use Vulkan or the private graphics protocol.
+With the Android graphics activity running, the same tool can exercise the
+private transport without Mesa or Vulkan:
+
+```sh
+./build/kolos-wayland-probe --graphics
+```
+
+It requests every slot, validates the received handle size and two FDs,
+sends `POOL_READY`, and waits for one initial `FREE` per slot. It closes the
+received FDs without importing them; the graphics object is then destroyed,
+causing the bridge to clean up its Android connection.
 The initial configure is 0x0 (client chooses a size); after the Android pool is
 bound, `xdg_toplevel.configure` carries the AHB generation's width and height.
 Requested Wayland size, Android surface size, and AHB pool size remain separate
