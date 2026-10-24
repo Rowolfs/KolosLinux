@@ -1,12 +1,17 @@
 #include <kolos/ahb_import.h>
 #include <kolos_stream_wire.h>
 #include <cstdio>
+#include <cstdlib>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <cmath>
 #include <cerrno>
 #include <cstring>
 namespace kolos {
+static bool ahbDebugEnabled(){
+    const char* value=std::getenv("KOLOS_AHB_DEBUG");
+    return value && std::strcmp(value,"1")==0;
+}
 static void need(bool ok,const char* text){kw::require(ok,text);}
 static void check(VkResult r,const char* text){
     if(r!=VK_SUCCESS)throw std::runtime_error(std::string(text)+": VkResult="+std::to_string(r));
@@ -44,15 +49,18 @@ void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
     std::printf("Received %zu bytes, %zu FDs\n",bytes.size(),s.fds.size());
         need(bytes.size()==148 && s.fds.size()==2,"unexpected AHB wire layout; stop");
         uint32_t w[37]; memcpy(w,bytes.data(),sizeof(w));
-        for(uint32_t i=0;i<37;i++)
-            std::printf("AHB handle w[%02u]=0x%08x (%u)\n",i,w[i],w[i]);
-        for(size_t i=0;i<s.fds.size();i++) {
-            struct stat fdStat{};
-            if(fstat(s.fds[i],&fdStat)==0)
-                std::printf("AHB fd[%zu] size=%lld mode=0%o\n",i,
-                            static_cast<long long>(fdStat.st_size),unsigned(fdStat.st_mode));
-            else
-                std::printf("AHB fd[%zu] fstat failed: errno=%d (%s)\n",i,errno,strerror(errno));
+        const bool debug=ahbDebugEnabled();
+        if(debug) {
+            for(uint32_t i=0;i<37;i++)
+                std::printf("AHB handle w[%02u]=0x%08x (%u)\n",i,w[i],w[i]);
+            for(size_t i=0;i<s.fds.size();i++) {
+                struct stat fdStat{};
+                if(fstat(s.fds[i],&fdStat)==0)
+                    std::printf("AHB fd[%zu] size=%lld mode=0%o\n",i,
+                                static_cast<long long>(fdStat.st_size),unsigned(fdStat.st_mode));
+                else
+                    std::printf("AHB fd[%zu] fstat failed: errno=%d (%s)\n",i,errno,strerror(errno));
+            }
         }
         // This is still a device-specific layout hypothesis. The observed
         // allocation has stride-sized rows and may have more rows than the
@@ -64,8 +72,9 @@ void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
         bool candidate=true;
         auto equal=[&](uint32_t index,uint32_t expected) {
             const bool match=w[index]==expected;
-            std::printf("AHB candidate w[%02u]: %s actual=0x%08x expected=0x%08x\n",
-                        index,match?"PASS":"FAIL",w[index],expected);
+            if(debug || !match)
+                std::printf("AHB candidate w[%02u]: %s actual=0x%08x expected=0x%08x\n",
+                            index,match?"PASS":"FAIL",w[index],expected);
             candidate &= match;
         };
         equal(0,0x47423031);equal(1,width);equal(2,height);equal(3,stride);
@@ -73,17 +82,19 @@ void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
         equal(13,0x676d736d);equal(14,0x00100288);
         equal(15,stride);
         const bool allocationRowsMatch=w[16]>=height;
-        std::printf("AHB candidate w[16] allocation rows: %s actual=%u visibleHeight=%u\n",
-                    allocationRowsMatch?"PASS":"FAIL",w[16],height);
+        if(debug || !allocationRowsMatch)
+            std::printf("AHB candidate w[16] allocation rows: %s actual=%u visibleHeight=%u\n",
+                        allocationRowsMatch?"PASS":"FAIL",w[16],height);
         candidate &= allocationRowsMatch;
         equal(17,width);equal(18,height);
         equal(19,1);equal(20,0);equal(21,1);equal(24,0xb00);equal(25,0);
         const uint64_t allocationBytes=uint64_t(stride)*w[16]*4;
         const bool sizeMatch=allocationBytes<=UINT32_MAX && w[26]==allocationBytes;
-        std::printf("AHB candidate w[26]: %s actual=%u stride*allocationRows*4=%llu minimum=%llu\n",
-                    sizeMatch?"PASS":"FAIL",w[26],
-                    static_cast<unsigned long long>(allocationBytes),
-                    static_cast<unsigned long long>(minimumSize));
+        if(debug || !sizeMatch)
+            std::printf("AHB candidate w[26]: %s actual=%u stride*allocationRows*4=%llu minimum=%llu\n",
+                        sizeMatch?"PASS":"FAIL",w[26],
+                        static_cast<unsigned long long>(allocationBytes),
+                        static_cast<unsigned long long>(minimumSize));
         candidate &= sizeMatch;
         equal(27,0);equal(28,0);
 
@@ -96,12 +107,14 @@ void importGraphicsBuffer(Context& v,Imported& s,int socketFd,uint32_t width,
         std::vector<VkDrmFormatModifierPropertiesEXT> modifiers(list.drmFormatModifierCount);
         list.pDrmFormatModifierProperties=modifiers.data();
         vkGetPhysicalDeviceFormatProperties2(gpu,format,&fp);
-        std::printf("Vulkan RGBA8 DRM modifiers: %u\n",list.drmFormatModifierCount);
-        for(const auto& m:modifiers)
-            std::printf("  modifier=0x%016llx planes=%u tilingFeatures=0x%llx\n",
-                        static_cast<unsigned long long>(m.drmFormatModifier),
-                        m.drmFormatModifierPlaneCount,
-                        static_cast<unsigned long long>(m.drmFormatModifierTilingFeatures));
+        if(debug) {
+            std::printf("Vulkan RGBA8 DRM modifiers: %u\n",list.drmFormatModifierCount);
+            for(const auto& m:modifiers)
+                std::printf("  modifier=0x%016llx planes=%u tilingFeatures=0x%llx\n",
+                            static_cast<unsigned long long>(m.drmFormatModifier),
+                            m.drmFormatModifierPlaneCount,
+                            static_cast<unsigned long long>(m.drmFormatModifierTilingFeatures));
+        }
         need(candidate,"AHB differs from tested linear-layout candidate; stop");
         struct stat st{};
         need(fstat(s.fds[0],&st)==0 && st.st_size>=static_cast<off_t>(minimumSize) &&
