@@ -132,3 +132,67 @@ begin. No build or binaries are run during Windows-side refactoring.
 
 No Mesa integration or explicit fence FD exchange is introduced. See
 [protocol lifecycle](protocol/README.md).
+# Kolos Wayland compositor foundation
+
+`kolos-compositor` is the owner of the Android Graphics Protocol v2 connection.
+It provides `wl_compositor`, `xdg_wm_base`, and the private
+`kolos_graphics_v1` global. A private `kolos_surface_v1` is bound to a
+same-client `wl_surface` that already has an `xdg_toplevel` role. The compositor
+selects the Android session; the Wayland client cannot choose a session ID.
+
+Build on ARM64 Debian with `libwayland-dev`, `wayland-protocols`,
+`libvulkan-dev`, CMake, and a C++17 compiler:
+
+```sh
+apt install build-essential cmake pkg-config libvulkan-dev libwayland-dev wayland-protocols
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+Launch after the Android graphics activity has created its socket:
+
+```sh
+./build/kolos-compositor /run/kolos/graphics.sock /run/kolos/wayland
+```
+
+In another shell in the same Debian environment:
+
+```sh
+export XDG_RUNTIME_DIR=/run/kolos/wayland
+export WAYLAND_DISPLAY=wayland-0
+./build/kolos-wayland-probe
+```
+
+The probe creates one `wl_surface` and `xdg_toplevel` and exits after its
+initial configure. It does not use Vulkan or the private graphics protocol.
+The initial configure is 0x0 (client chooses a size); after the Android pool is
+bound, `xdg_toplevel.configure` carries the AHB generation's width and height.
+Requested Wayland size, Android surface size, and AHB pool size remain separate
+values. Only Android `POOL_REPLACED` advances the AHB generation.
+
+Graphics Protocol v2 currently exposes one pre-created Android session through
+`graphics.sock`, with no CREATE_SESSION operation. The compositor creates a
+separate `KolosWindow` for each toplevel, but only one window may bind the
+Android bridge at a time. A second private graphics binding receives an error
+event. Multiwindow display needs an Android session-create/routing extension.
+After an abnormal Android disconnect, the private client can destroy its
+`kolos_surface_v1` and bind a new one to the same toplevel; this creates a fresh
+Graphics Protocol v2 connection and reexports the current AHB generation.
+There is no Mesa swapchain hook yet, so the Wayland probe does not produce an
+Android image. The compositor neither imports AHB into Vulkan nor composes
+ordinary `wl_buffer` contents at this milestone.
+
+The bridge repeats the proven HELLO/SESSION_INFO, per-slot GET_BUFFER and
+IMPORT_ACK, START, POOL_REPLACED/POOL_READY, PRESENT/ACK/FREE and STOP/DONE
+protocol. It forwards opaque 148-byte native-handle data and two FDs through
+Wayland fd arguments. `IMPORT_ACK` means that the compositor safely holds the
+handle; `POOL_READY` is sent to Android only after Mesa later confirms import
+of every slot. The private protocol supplies raw handle data and AHB stride so
+Mesa's observed Qualcomm layout validator can derive its explicit Vulkan
+modifier/offset/pitch/allocation descriptor. No new layout is assumed here.
+
+On a replacement, the compositor delivers `pool_replaced` and new buffers,
+updates the Wayland configure size, and forwards `pool_ready` only when the
+private client sends it. Old-generation FREE events retain their generation.
+The compositor drops its old handle cache after replacement; Mesa's imported
+image and FD ownership remain independent of this cache.
