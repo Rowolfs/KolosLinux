@@ -212,6 +212,9 @@ mpv --no-config --vo=gpu-next --gpu-api=vulkan --gpu-context=waylandvk \
 
 The private MesaKolos WSI currently offers FIFO presentation; MPV's `auto`
 mode can select MAILBOX on Wayland, so request FIFO explicitly.
+For the private AHB path, a `wl_surface.frame` request is associated with the
+next PRESENT and completed when Android ACKs that PRESENT. This lets MPV's
+Wayland frame pacing advance without a `wl_buffer` commit.
 
 The bridge repeats the proven HELLO/SESSION_INFO, per-slot GET_BUFFER and
 IMPORT_ACK, START, POOL_REPLACED/POOL_READY, PRESENT/ACK/FREE and STOP/DONE

@@ -40,6 +40,7 @@ struct Surface {
     wl_resource* viewport = nullptr;
     wl_resource* pendingBuffer = nullptr;
     std::vector<wl_resource*> frameCallbacks;
+    std::map<std::pair<uint64_t, uint64_t>, std::vector<wl_resource*>> presentedCallbacks;
     std::unique_ptr<KolosWindow> window;
 };
 struct KolosWindow {
@@ -189,8 +190,24 @@ private:
         if (surface->viewport) wl_resource_set_user_data(surface->viewport, nullptr);
         for (auto* callback : surface->frameCallbacks)
             wl_resource_destroy(callback);
+        discardPresentedCallbacks(*surface);
         std::puts("wl_surface destroyed");
         surface->compositor->surfaces_.erase(resource);
+    }
+    static void sendFrameCallbacks(std::vector<wl_resource*>& callbacks) {
+        auto milliseconds = uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        for (auto* callback : callbacks) {
+            wl_callback_send_done(callback, milliseconds);
+            wl_resource_destroy(callback);
+        }
+        callbacks.clear();
+    }
+    static void discardPresentedCallbacks(Surface& surface) {
+        for (auto& entry : surface.presentedCallbacks)
+            for (auto* callback : entry.second)
+                wl_resource_destroy(callback);
+        surface.presentedCallbacks.clear();
     }
     static int dispatchSurface(const void*, void* target, uint32_t opcode,
                                const wl_message*, wl_argument* args) {
@@ -218,13 +235,7 @@ private:
                 wl_buffer_send_release(surface->pendingBuffer);
                 surface->pendingBuffer = nullptr;
             }
-            auto milliseconds = uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
-            for (auto* callback : surface->frameCallbacks) {
-                wl_callback_send_done(callback, milliseconds);
-                wl_resource_destroy(callback);
-            }
-            surface->frameCallbacks.clear();
+            sendFrameCallbacks(surface->frameCallbacks);
             break;
         }
         default: break; // damage/regions are not composited at this milestone.
@@ -447,6 +458,7 @@ private:
         window->bridge.reset();
         auto* self = window->surface->compositor;
         if (self->activeWindow_ == window) self->activeWindow_ = nullptr;
+        discardPresentedCallbacks(*window->surface);
         window->buffers.clear(); window->requests.clear();
         window->pool = {};
         window->hasPool = false;
@@ -496,6 +508,12 @@ private:
                 return 0;
             }
             window->bridge->present({window->pool.session, generation, slot}, serial);
+            if (!window->surface->frameCallbacks.empty()) {
+                auto& callbacks = window->surface->frameCallbacks;
+                window->surface->presentedCallbacks.emplace(
+                    std::make_pair(generation, serial), std::move(callbacks));
+                callbacks.clear();
+            }
             std::printf("PRESENT forwarded session=%llu generation=%llu slot=%u serial=%llu\n",
                 (unsigned long long)window->pool.session,
                 (unsigned long long)generation, slot, (unsigned long long)serial);
@@ -536,6 +554,11 @@ private:
                     break;
                 }
                 window->pool = event.pool; window->hasPool = true;
+                if (replacement) {
+                    for (auto& entry : window->surface->presentedCallbacks)
+                        sendFrameCallbacks(entry.second);
+                    window->surface->presentedCallbacks.clear();
+                }
                 window->readyGeneration = 0;
                 window->buffers.clear(); window->requests.clear();
                 self->setOutputSize(event.pool.width, event.pool.height);
@@ -584,10 +607,17 @@ private:
                 break;
             case GraphicsEvent::Type::Ack:
                 if (window->hasPool && event.id.session == window->pool.session &&
-                    window->graphics)
+                    window->graphics) {
                     kolos_surface_v1_send_ack(window->graphics,
                         hi(event.id.generation), lo(event.id.generation), event.id.slot,
                         hi(event.serial), lo(event.serial));
+                    auto& callbacks = window->surface->presentedCallbacks;
+                    auto found = callbacks.find(std::make_pair(event.id.generation, event.serial));
+                    if (found != callbacks.end()) {
+                        sendFrameCallbacks(found->second);
+                        callbacks.erase(found);
+                    }
+                }
                 break;
             case GraphicsEvent::Type::Error:
                 std::fprintf(stderr, "Android graphics bridge: %s\n", event.message.c_str());
