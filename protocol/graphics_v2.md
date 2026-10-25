@@ -16,6 +16,7 @@ An identity is `uint64 sessionId, uint64 poolGeneration, uint32 slot`.
 | START / STOP | uint64 sessionId, uint64 generation |
 | FREE | identity |
 | PRESENT / ACK | identity, uint64 serial |
+| PRESENT_FENCED | PRESENT payload plus one SCM_RIGHTS sync_file FD |
 | DONE | uint64 sessionId, uint64 generation, uint64 completed frames |
 | ERROR | uint32 error code followed by UTF-8 diagnostic bytes |
 | POOL_REPLACED | Same fields as SESSION_INFO; Android announces a new current generation. |
@@ -31,6 +32,11 @@ After all imports, Linux sends START on control and receives one initial FREE
 per slot. Only the control stream carries PRESENT/ACK/FREE/STOP/DONE.
 
 ACK confirms a PRESENT transaction; **only FREE permits reacquisition**. On
+PRESENT_FENCED, the sync_file FD accompanies the first header byte via
+SCM_RIGHTS. Android transfers that FD to SurfaceControl as its acquire fence;
+the compositor and Android close their local copies on drop or error. Legacy
+PRESENT carries no FD and requires Linux to finish GPU work before sending.
+On
 replacement, Android waits for the previous SurfaceControl release fence before
 FREE(previous). On STOP it detaches the final buffer, emits its FREE after
 release, then DONE. All control writes are serialized by the Android IPC thread.

@@ -18,6 +18,8 @@
 #include <unordered_map>
 #include <utility>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace {
 using kolos::AndroidGraphicsBridge;
@@ -78,7 +80,7 @@ public:
         wl_global_create(display_, &xdg_wm_base_interface, 1, this, bindXdg);
         wl_global_create(display_, &wl_output_interface, 2, this, bindOutput);
         wl_global_create(display_, &wp_viewporter_interface, 1, this, bindViewporter);
-        wl_global_create(display_, &kolos_graphics_v1_interface, 1, this, bindGraphics);
+        wl_global_create(display_, &kolos_graphics_v1_interface, 2, this, bindGraphics);
         clientCreated_.notify = clientCreated;
         wl_display_add_client_created_listener(display_, &clientCreated_);
         auto* loop = wl_display_get_event_loop(display_);
@@ -147,8 +149,8 @@ private:
         auto* value = resource(client, &xdg_wm_base_interface, id);
         if (value) wl_resource_set_dispatcher(value, dispatchXdg, nullptr, data, nullptr);
     }
-    static void bindGraphics(wl_client* client, void* data, uint32_t, uint32_t id) {
-        auto* value = resource(client, &kolos_graphics_v1_interface, id);
+    static void bindGraphics(wl_client* client, void* data, uint32_t version, uint32_t id) {
+        auto* value = resource(client, &kolos_graphics_v1_interface, id, version);
         if (value) wl_resource_set_dispatcher(value, dispatchGraphics, nullptr, data, nullptr);
     }
     static int dispatchCompositor(const void*, void* target, uint32_t opcode,
@@ -421,7 +423,8 @@ private:
             return 0;
         }
         auto* resource = KolosCompositor::resource(wl_resource_get_client(manager),
-                                                   &kolos_surface_v1_interface, args[0].n);
+                                                   &kolos_surface_v1_interface, args[0].n,
+                                                   wl_resource_get_version(manager));
         if (!resource) return 0;
         auto* window = it->second->window.get();
         window->graphics = resource;
@@ -469,6 +472,21 @@ private:
         auto* resource = static_cast<wl_resource*>(target);
         auto* window = static_cast<KolosWindow*>(wl_resource_get_user_data(resource));
         if (opcode == 0) { wl_resource_destroy(resource); return 0; }
+        // libwayland closes the request FD after dispatch. The worker needs
+        // its own copy because it sends PRESENT on another thread.
+        int retained = -1;
+        if (opcode == 4) {
+            retained = fcntl(args[5].h, F_DUPFD_CLOEXEC, 0);
+            if (retained < 0) {
+                kolos_surface_v1_send_error(resource, "cannot retain acquire fence");
+                return 0;
+            }
+        }
+        struct ReceivedFence {
+            int fd;
+            ~ReceivedFence() { if (fd >= 0) close(fd); }
+            int release() { int value = fd; fd = -1; return value; }
+        } received{retained};
         if (!window->bridge || !window->hasPool) {
             kolos_surface_v1_send_error(resource, "Android graphics session unavailable");
             return 0;
@@ -492,7 +510,7 @@ private:
             }
             window->readyGeneration = generation;
             window->bridge->poolReady(window->pool.session, generation);
-        } else if (opcode == 3) {
+        } else if (opcode == 3 || opcode == 4) {
             uint32_t slot = args[2].u;
             uint64_t serial = join(args[3].u, args[4].u);
             if (generation < window->pool.generation) {
@@ -507,7 +525,8 @@ private:
                 kolos_surface_v1_send_error(resource, "stale PRESENT");
                 return 0;
             }
-            window->bridge->present({window->pool.session, generation, slot}, serial);
+            window->bridge->present({window->pool.session, generation, slot}, serial,
+                                    received.release());
             if (!window->surface->frameCallbacks.empty()) {
                 auto& callbacks = window->surface->frameCallbacks;
                 window->surface->presentedCallbacks.emplace(

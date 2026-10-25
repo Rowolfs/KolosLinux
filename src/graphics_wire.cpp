@@ -67,4 +67,26 @@ void writeFrame(int fd,uint32_t opcode,const std::vector<uint8_t>& payload) {
     bytes.insert(bytes.end(),payload.begin(),payload.end());
     writeAll(fd,bytes.data(),bytes.size());
 }
+void writeFrameWithFd(int fd,uint32_t opcode,const std::vector<uint8_t>& payload,int sendFd) {
+    if(sendFd<0 || payload.size()>kMaxPayload)
+        throw std::runtime_error("invalid graphics fenced frame");
+    std::vector<uint8_t> bytes; bytes.reserve(16+payload.size());
+    put32(bytes,kMagic);put32(bytes,kVersion);put32(bytes,opcode);put32(bytes,uint32_t(payload.size()));
+    bytes.insert(bytes.end(),payload.begin(),payload.end());
+    alignas(cmsghdr) uint8_t ancillary[CMSG_SPACE(sizeof(int))]{};
+    iovec iov{bytes.data(),1};
+    msghdr msg{}; msg.msg_iov=&iov; msg.msg_iovlen=1;
+    msg.msg_control=ancillary; msg.msg_controllen=sizeof(ancillary);
+    cmsghdr* c=CMSG_FIRSTHDR(&msg);
+    c->cmsg_level=SOL_SOCKET; c->cmsg_type=SCM_RIGHTS; c->cmsg_len=CMSG_LEN(sizeof(int));
+    std::memcpy(CMSG_DATA(c),&sendFd,sizeof(int));
+    for(;;) {
+        ready(fd,POLLOUT);
+        ssize_t n=sendmsg(fd,&msg,MSG_DONTWAIT|MSG_NOSIGNAL);
+        if(n<0 && (errno==EINTR||errno==EAGAIN)) continue;
+        if(n!=1) throw std::runtime_error("graphics socket fenced write failed");
+        break;
+    }
+    writeAll(fd,bytes.data()+1,bytes.size()-1);
+}
 } // namespace kolos::graphics::wire

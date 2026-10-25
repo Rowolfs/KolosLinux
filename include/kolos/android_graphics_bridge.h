@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <unistd.h>
 
 namespace kolos {
 
@@ -55,7 +56,8 @@ public:
     AndroidGraphicsBridge& operator=(const AndroidGraphicsBridge&) = delete;
     void start();
     void poolReady(uint64_t session, uint64_t generation);
-    void present(GraphicsIdentity id, uint64_t serial);
+    // Takes ownership of acquireFenceFd; -1 selects the legacy CPU-wait path.
+    void present(GraphicsIdentity id, uint64_t serial, int acquireFenceFd = -1);
     void stop();
     int eventFd() const { return eventFd_; }
     std::vector<GraphicsEvent> takeEvents();
@@ -64,6 +66,19 @@ private:
         enum class Type { Ready, Present, Stop } type;
         GraphicsIdentity id;
         uint64_t serial = 0;
+        struct Fence {
+            int fd = -1;
+            Fence() = default;
+            explicit Fence(int value) : fd(value) {}
+            ~Fence() { if (fd >= 0) close(fd); }
+            Fence(const Fence&) = delete;
+            Fence& operator=(const Fence&) = delete;
+            Fence(Fence&& other) noexcept : fd(other.fd) { other.fd = -1; }
+            Fence& operator=(Fence&& other) noexcept {
+                if (this != &other) { if (fd >= 0) close(fd); fd = other.fd; other.fd = -1; }
+                return *this;
+            }
+        } fence;
     };
     void run();
     void push(GraphicsEvent event);

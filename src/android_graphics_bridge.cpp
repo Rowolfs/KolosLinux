@@ -152,20 +152,20 @@ void AndroidGraphicsBridge::start() {
     worker_ = std::thread(&AndroidGraphicsBridge::run, this);
 }
 void AndroidGraphicsBridge::command(Command value) {
-    { std::lock_guard<std::mutex> lock(mutex_); commands_.push_back(value); }
+    { std::lock_guard<std::mutex> lock(mutex_); commands_.push_back(std::move(value)); }
     signal(commandFd_);
 }
 void AndroidGraphicsBridge::poolReady(uint64_t session, uint64_t generation) {
     command({Command::Type::Ready, {session, generation, 0}, 0});
 }
-void AndroidGraphicsBridge::present(GraphicsIdentity id, uint64_t serial) {
-    command({Command::Type::Present, id, serial});
+void AndroidGraphicsBridge::present(GraphicsIdentity id, uint64_t serial, int acquireFenceFd) {
+    command({Command::Type::Present, id, serial, Command::Fence(acquireFenceFd)});
 }
 void AndroidGraphicsBridge::stop() { command({Command::Type::Stop, {}, 0}); }
 bool AndroidGraphicsBridge::takeCommand(Command& out) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (commands_.empty()) return false;
-    out = commands_.front(); commands_.pop_front();
+    out = std::move(commands_.front()); commands_.pop_front();
     return true;
 }
 void AndroidGraphicsBridge::push(GraphicsEvent event) {
@@ -267,7 +267,11 @@ void AndroidGraphicsBridge::run() {
                             throw std::runtime_error("stale graphics PRESENT");
                         auto bytes = encode(cmd.id);
                         wire::put64(bytes, cmd.serial);
-                        wire::writeFrame(control.value, wire::PRESENT, bytes);
+                        if (cmd.fence.fd >= 0)
+                            wire::writeFrameWithFd(control.value, wire::PRESENT_FENCED,
+                                                   bytes, cmd.fence.fd);
+                        else
+                            wire::writeFrame(control.value, wire::PRESENT, bytes);
                     }
                 }
             }
