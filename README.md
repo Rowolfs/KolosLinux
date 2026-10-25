@@ -130,14 +130,16 @@ For Debian validation, retain the 300-frame visual/STOP-DONE checks and exercise
 present before preparation, repeated preparation, wrong/stale tokens and end before
 begin. No build or binaries are run during Windows-side refactoring.
 
-No Mesa integration or explicit fence FD exchange is introduced. See
+The standalone pool described above does not exchange explicit fence FDs. See
 [protocol lifecycle](protocol/README.md).
+
 # Kolos Wayland compositor foundation
 
 `kolos-compositor` is the owner of the Android Graphics Protocol v2 connection.
-It provides `wl_compositor`, `xdg_wm_base`, and the private
-`kolos_graphics_v1` global. A private `kolos_surface_v1` is bound to a
-same-client `wl_surface` that already has an `xdg_toplevel` role. The compositor
+It provides `wl_compositor` v4, `wl_output` v2, `wp_viewporter` v1,
+`xdg_wm_base`, and the private `kolos_graphics_v1` global. A private
+`kolos_surface_v1` is bound to a same-client `wl_surface` that already has an
+`xdg_toplevel` role. The compositor
 selects the Android session; the Wayland client cannot choose a session ID.
 
 Build on ARM64 Debian with `libwayland-dev`, `wayland-protocols`,
@@ -189,9 +191,27 @@ event. Multiwindow display needs an Android session-create/routing extension.
 After an abnormal Android disconnect, the private client can destroy its
 `kolos_surface_v1` and bind a new one to the same toplevel; this creates a fresh
 Graphics Protocol v2 connection and reexports the current AHB generation.
-There is no Mesa swapchain hook yet, so the Wayland probe does not produce an
-Android image. The compositor neither imports AHB into Vulkan nor composes
-ordinary `wl_buffer` contents at this milestone.
+MesaKolos imports the AHB images for its private Wayland WSI path. The Wayland
+probe does not import them. The compositor does not import AHB into Vulkan or
+compose ordinary `wl_buffer` contents. Its virtual `wl_output` mode follows the
+Android pool size; refresh is unspecified. Viewport requests are accepted for
+the private AHB presentation path, without compositing attached `wl_buffer`s.
+
+For MPV 0.40 with MesaKolos installed, keep the Android graphics activity and
+the compositor running, then set the MesaKolos ICD and run:
+
+```sh
+export XDG_RUNTIME_DIR=/run/kolos/wayland
+export WAYLAND_DISPLAY=wayland-0
+export VK_DRIVER_FILES=/opt/mesa-kolos/share/vulkan/icd.d/freedreno_icd.aarch64.json
+export LD_LIBRARY_PATH=/opt/mesa-kolos/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+mpv --no-config --vo=gpu-next --gpu-api=vulkan --gpu-context=waylandvk \
+    --vulkan-swap-mode=fifo --hwdec=no --audio=no \
+    "/home/kolos/Videos/Test Jellyfin 4K AVC 40M.mp4"
+```
+
+The private MesaKolos WSI currently offers FIFO presentation; MPV's `auto`
+mode can select MAILBOX on Wayland, so request FIFO explicitly.
 
 The bridge repeats the proven HELLO/SESSION_INFO, per-slot GET_BUFFER and
 IMPORT_ACK, START, POOL_REPLACED/POOL_READY, PRESENT/ACK/FREE and STOP/DONE

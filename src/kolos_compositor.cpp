@@ -1,6 +1,7 @@
 #include <kolos/android_graphics_bridge.h>
 #include <wayland-server.h>
 #include "xdg-shell-server-protocol.h"
+#include "viewporter-server-protocol.h"
 #include "kolos-graphics-v1-server-protocol.h"
 
 #include <chrono>
@@ -36,6 +37,7 @@ struct Surface {
     KolosCompositor* compositor;
     wl_resource* resource = nullptr;
     wl_resource* xdgSurface = nullptr;
+    wl_resource* viewport = nullptr;
     wl_resource* pendingBuffer = nullptr;
     std::vector<wl_resource*> frameCallbacks;
     std::unique_ptr<KolosWindow> window;
@@ -71,8 +73,10 @@ public:
         if (!display_) throw std::runtime_error("wl_display_create failed");
         if (wl_display_add_socket(display_, "wayland-0") != 0)
             throw std::runtime_error("cannot create wayland-0 socket");
-        wl_global_create(display_, &wl_compositor_interface, 1, this, bindCompositor);
+        wl_global_create(display_, &wl_compositor_interface, 4, this, bindCompositor);
         wl_global_create(display_, &xdg_wm_base_interface, 1, this, bindXdg);
+        wl_global_create(display_, &wl_output_interface, 2, this, bindOutput);
+        wl_global_create(display_, &wp_viewporter_interface, 1, this, bindViewporter);
         wl_global_create(display_, &kolos_graphics_v1_interface, 1, this, bindGraphics);
         clientCreated_.notify = clientCreated;
         wl_display_add_client_created_listener(display_, &clientCreated_);
@@ -100,14 +104,43 @@ private:
         std::puts("Wayland client connected");
     }
     static wl_resource* resource(wl_client* client, const wl_interface* type,
-                                 uint32_t id) {
-        wl_resource* value = wl_resource_create(client, type, 1, id);
+                                 uint32_t id, int version = 1) {
+        wl_resource* value = wl_resource_create(client, type, version, id);
         if (!value) wl_client_post_no_memory(client);
         return value;
     }
-    static void bindCompositor(wl_client* client, void* data, uint32_t, uint32_t id) {
-        auto* value = resource(client, &wl_compositor_interface, id);
+    static void bindCompositor(wl_client* client, void* data, uint32_t version, uint32_t id) {
+        auto* value = resource(client, &wl_compositor_interface, id, version);
         if (value) wl_resource_set_dispatcher(value, dispatchCompositor, nullptr, data, nullptr);
+    }
+    static void bindOutput(wl_client* client, void* data, uint32_t version, uint32_t id) {
+        auto* self = static_cast<KolosCompositor*>(data);
+        auto* value = resource(client, &wl_output_interface, id, version);
+        if (!value) return;
+        wl_resource_set_dispatcher(value, dispatchOutput, nullptr, self, destroyOutput);
+        self->outputs_.emplace(value, client);
+        wl_output_send_geometry(value, 0, 0, 0, 0, WL_OUTPUT_SUBPIXEL_UNKNOWN,
+                                "Kolos", "Android", WL_OUTPUT_TRANSFORM_NORMAL);
+        wl_output_send_mode(value, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
+                            self->outputWidth_, self->outputHeight_, 0);
+        wl_output_send_scale(value, 1);
+        wl_output_send_done(value);
+        for (const auto& entry : self->surfaces_) {
+            auto* surfaceResource = entry.first;
+            if (wl_resource_get_client(surfaceResource) == client &&
+                wl_resource_get_version(surfaceResource) >= 2)
+                wl_surface_send_enter(surfaceResource, value);
+        }
+    }
+    static int dispatchOutput(const void*, void*, uint32_t,
+                              const wl_message*, wl_argument*) { return 0; }
+    static void destroyOutput(wl_resource* value) {
+        auto* self = static_cast<KolosCompositor*>(wl_resource_get_user_data(value));
+        self->outputs_.erase(value);
+    }
+    static void bindViewporter(wl_client* client, void* data, uint32_t, uint32_t id) {
+        auto* value = resource(client, &wp_viewporter_interface, id);
+        if (value) wl_resource_set_dispatcher(value, dispatchViewporter, nullptr, data, nullptr);
     }
     static void bindXdg(wl_client* client, void* data, uint32_t, uint32_t id) {
         auto* value = resource(client, &xdg_wm_base_interface, id);
@@ -123,13 +156,17 @@ private:
         auto* self = static_cast<KolosCompositor*>(wl_resource_get_user_data(manager));
         auto* client = wl_resource_get_client(manager);
         if (opcode == 0) {
-            auto* value = resource(client, &wl_surface_interface, args[0].n);
+            auto* value = resource(client, &wl_surface_interface, args[0].n,
+                                   wl_resource_get_version(manager));
             if (!value) return 0;
             auto surface = std::make_unique<Surface>();
             surface->compositor = self; surface->resource = value;
             wl_resource_set_dispatcher(value, dispatchSurface, nullptr,
                                        surface.get(), destroySurface);
             self->surfaces_.emplace(value, std::move(surface));
+            for (const auto& [output, owner] : self->outputs_)
+                if (owner == client && wl_resource_get_version(value) >= 2)
+                    wl_surface_send_enter(value, output);
             std::puts("wl_surface created");
         } else if (opcode == 1) {
             auto* value = resource(client, &wl_region_interface, args[0].n);
@@ -149,6 +186,7 @@ private:
             surface->window.reset();
         }
         if (surface->xdgSurface) wl_resource_destroy(surface->xdgSurface);
+        if (surface->viewport) wl_resource_set_user_data(surface->viewport, nullptr);
         for (auto* callback : surface->frameCallbacks)
             wl_resource_destroy(callback);
         std::puts("wl_surface destroyed");
@@ -197,6 +235,64 @@ private:
                               const wl_message*, wl_argument*) {
         if (opcode == 0) wl_resource_destroy(static_cast<wl_resource*>(target));
         return 0;
+    }
+    static int dispatchViewporter(const void*, void* target, uint32_t opcode,
+                                  const wl_message*, wl_argument* args) {
+        auto* manager = static_cast<wl_resource*>(target);
+        if (opcode == 0) {
+            wl_resource_destroy(manager);
+        } else if (opcode == 1) {
+            auto* self = static_cast<KolosCompositor*>(wl_resource_get_user_data(manager));
+            auto* wlSurface = reinterpret_cast<wl_resource*>(args[1].o);
+            auto it = self->surfaces_.find(wlSurface);
+            if (it == self->surfaces_.end() ||
+                wl_resource_get_client(wlSurface) != wl_resource_get_client(manager) ||
+                it->second->viewport) {
+                wl_resource_post_error(manager, WP_VIEWPORTER_ERROR_VIEWPORT_EXISTS,
+                                       "invalid or already viewported wl_surface");
+                return 0;
+            }
+            auto* viewport = resource(wl_resource_get_client(manager),
+                                      &wp_viewport_interface, args[0].n);
+            if (!viewport) return 0;
+            it->second->viewport = viewport;
+            wl_resource_set_dispatcher(viewport, dispatchViewport, nullptr,
+                                       it->second.get(), destroyViewport);
+        }
+        return 0;
+    }
+    static int dispatchViewport(const void*, void* target, uint32_t opcode,
+                                const wl_message*, wl_argument* args) {
+        auto* viewport = static_cast<wl_resource*>(target);
+        if (opcode == 0) {
+            wl_resource_destroy(viewport);
+            return 0;
+        }
+        if (!wl_resource_get_user_data(viewport)) {
+            wl_resource_post_error(viewport, WP_VIEWPORT_ERROR_NO_SURFACE,
+                                   "viewport surface was destroyed");
+            return 0;
+        }
+        // AHB frames use private PRESENT rather than wl_buffer.attach. Keep
+        // viewport request validation even though no wl_buffer is composited.
+        if (opcode == 1) {
+            const bool unset = args[0].f == -256 && args[1].f == -256 &&
+                               args[2].f == -256 && args[3].f == -256;
+            if (!unset && (args[0].f < 0 || args[1].f < 0 ||
+                           args[2].f <= 0 || args[3].f <= 0))
+                wl_resource_post_error(viewport, WP_VIEWPORT_ERROR_BAD_VALUE,
+                                       "invalid viewport source");
+        } else if (opcode == 2 &&
+                   !((args[0].i == -1 && args[1].i == -1) ||
+                     (args[0].i > 0 && args[1].i > 0))) {
+            wl_resource_post_error(viewport, WP_VIEWPORT_ERROR_BAD_VALUE,
+                                   "invalid viewport destination");
+        }
+        return 0;
+    }
+    static void destroyViewport(wl_resource* viewport) {
+        auto* surface = static_cast<Surface*>(wl_resource_get_user_data(viewport));
+        if (surface && surface->viewport == viewport) surface->viewport = nullptr;
     }
     static int dispatchXdg(const void*, void* target, uint32_t opcode,
                            const wl_message*, wl_argument* args) {
@@ -442,6 +538,7 @@ private:
                 window->pool = event.pool; window->hasPool = true;
                 window->readyGeneration = 0;
                 window->buffers.clear(); window->requests.clear();
+                self->setOutputSize(event.pool.width, event.pool.height);
                 if (replacement) {
                     kolos_surface_v1_send_pool_replaced(window->graphics,
                         hi(event.pool.generation), lo(event.pool.generation),
@@ -519,6 +616,17 @@ private:
         std::printf("xdg_toplevel.configure requested=%ux%u AHB-generation=%llu\n",
                     width, height, (unsigned long long)window.pool.generation);
     }
+    void setOutputSize(uint32_t width, uint32_t height) {
+        if (outputWidth_ == width && outputHeight_ == height) return;
+        outputWidth_ = width;
+        outputHeight_ = height;
+        for (const auto& entry : outputs_) {
+            auto* output = entry.first;
+            wl_output_send_mode(output, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
+                                width, height, 0);
+            wl_output_send_done(output);
+        }
+    }
 
     std::string androidPath_;
     wl_display* display_ = nullptr;
@@ -526,6 +634,8 @@ private:
     wl_event_source* terminateSource_ = nullptr;
     wl_listener clientCreated_{};
     std::unordered_map<wl_resource*, std::unique_ptr<Surface>> surfaces_;
+    std::unordered_map<wl_resource*, wl_client*> outputs_;
+    uint32_t outputWidth_ = 1920, outputHeight_ = 1080;
     KolosWindow* activeWindow_ = nullptr;
 };
 } // namespace
