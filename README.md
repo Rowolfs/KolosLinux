@@ -135,9 +135,6 @@ The standalone pool described above does not exchange explicit fence FDs. See
 
 # Kolos Wayland compositor foundation
 
-For offline comparison of Mesa, compositor and Android synchronization logs,
-see [the Python log analyzer](tools/sync-log-analysis.md).
-
 `kolos-compositor` is the owner of the Android Graphics Protocol v2 connection.
 It provides `wl_compositor` v4, `wl_output` v2, `wp_viewporter` v1,
 `xdg_wm_base`, and the private `kolos_graphics_v1` global. A private

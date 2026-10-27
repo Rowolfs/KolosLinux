@@ -8,5 +8,3 @@
 *.a
 *.so
 *.tmp
-/sync-analysis/
-__pycache__/
