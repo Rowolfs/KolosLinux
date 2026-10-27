@@ -3,6 +3,7 @@
 #include "xdg-shell-server-protocol.h"
 #include "viewporter-server-protocol.h"
 #include "kolos-graphics-v1-server-protocol.h"
+#include "sync_trace.h"
 
 #include <chrono>
 #include <csignal>
@@ -526,7 +527,9 @@ private:
                 return 0;
             }
             window->bridge->present({window->pool.session, generation, slot}, serial,
-                                    received.release());
+                                     received.release());
+            kolos::traceSync("wayland", "PRESENT_RX", window->pool.session,
+                             generation, slot, static_cast<int64_t>(serial), retained);
             if (!window->surface->frameCallbacks.empty()) {
                 auto& callbacks = window->surface->frameCallbacks;
                 window->surface->presentedCallbacks.emplace(
@@ -619,6 +622,8 @@ private:
                     window->graphics) {
                     kolos_surface_v1_send_free(window->graphics,
                         hi(event.id.generation), lo(event.id.generation), event.id.slot);
+                    kolos::traceSync("wayland", "FREE_TX", event.id.session,
+                                     event.id.generation, event.id.slot);
                     std::printf("FREE forwarded session=%llu generation=%llu slot=%u\n",
                         (unsigned long long)event.id.session,
                         (unsigned long long)event.id.generation, event.id.slot);
@@ -630,6 +635,9 @@ private:
                     kolos_surface_v1_send_ack(window->graphics,
                         hi(event.id.generation), lo(event.id.generation), event.id.slot,
                         hi(event.serial), lo(event.serial));
+                    kolos::traceSync("wayland", "ACK_TX", event.id.session,
+                                     event.id.generation, event.id.slot,
+                                     static_cast<int64_t>(event.serial));
                     auto& callbacks = window->surface->presentedCallbacks;
                     auto found = callbacks.find(std::make_pair(event.id.generation, event.serial));
                     if (found != callbacks.end()) {

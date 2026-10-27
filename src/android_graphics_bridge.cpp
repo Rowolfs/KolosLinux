@@ -1,6 +1,7 @@
 #include <kolos/android_graphics_bridge.h>
 #include <graphics_wire.h>
 #include <kolos_stream_wire.h>
+#include "sync_trace.h"
 
 #include <cerrno>
 #include <cstring>
@@ -272,6 +273,9 @@ void AndroidGraphicsBridge::run() {
                                                    bytes, cmd.fence.fd);
                         else
                             wire::writeFrame(control.value, wire::PRESENT, bytes);
+                        traceSync("bridge", "PRESENT_TX", cmd.id.session,
+                                  cmd.id.generation, cmd.id.slot,
+                                  static_cast<int64_t>(cmd.serial), cmd.fence.fd);
                     }
                 }
             }
@@ -291,7 +295,11 @@ void AndroidGraphicsBridge::run() {
                         GraphicsEvent::Type::Free : GraphicsEvent::Type::Ack);
                     event.id = identity(r);
                     if (frame.opcode == wire::ACK) event.serial = r.get64();
-                    r.end(); push(std::move(event));
+                    r.end();
+                    traceSync("bridge", frame.opcode == wire::FREE ? "FREE_RX" : "ACK_RX",
+                              event.id.session, event.id.generation, event.id.slot,
+                              frame.opcode == wire::ACK ? static_cast<int64_t>(event.serial) : -1);
+                    push(std::move(event));
                 } else if (frame.opcode == wire::ERROR) {
                     throw std::runtime_error("Android graphics ERROR");
                 } else throw std::runtime_error("unexpected Android graphics frame");
